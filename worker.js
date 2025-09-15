@@ -57,6 +57,34 @@ function imageTransforms(
     return tensor
 }
 
+const isTileEmpty = (imageData, threshold = 0.9, returnEmptyProportion = false) => {
+    const pixels = imageData.data
+    const numPixels = pixels.length / 4
+
+    let whitePixelCount = 0
+
+    for (let i = 0; i < pixels.length; i += 4) {
+        const r = pixels[i]
+        const g = pixels[i + 1]
+        const b = pixels[i + 2]
+
+        if (r > 200 && g > 200 && b > 200) {
+            whitePixelCount++
+        }
+    }
+
+    const whiteProportion = whitePixelCount / numPixels
+    let isEmpty = false
+    if (whiteProportion >= threshold) {
+        isEmpty = true
+    }
+    const returnObj = { isEmpty }
+    if (returnEmptyProportion) {
+        returnObj["emptyProportion"] = whiteProportion
+    }
+    return returnObj
+}
+
 const getSubPatchTensors = (patchParams, bitmap) => {
     //V.IMP TODO: Check that the border tiles (with width or height less than tileSizeForModel) are not being
     // stretched inordinately and creating bad embeddings.
@@ -78,16 +106,19 @@ const getSubPatchTensors = (patchParams, bitmap) => {
                 height: self.model.tileSizeForModel
             }
             const subPatchImageData = ctx.getImageData(...Object.values(subPatchParamsOnCanvas))
-            const subPatchTensor = imageTransforms(subPatchImageData, self.model.imageTransforms.mean, self.model.imageTransforms.std, self.model.tileSizeForModel)
-            subPatchTensors.push({
-                subPatchParams: {
-                    topLeftX: patchParams.topLeftX + subPatchParamsOnCanvas.topLeftX,
-                    topLeftY: patchParams.topLeftY + subPatchParamsOnCanvas.topLeftY,
-                    width: subPatchParamsOnCanvas.width,
-                    height: subPatchParamsOnCanvas.height,
-                },
-                tensor: subPatchTensor
-            })
+            const subPatchContents = isTileEmpty(subPatchImageData)
+            if (!subPatchContents.isEmpty) {
+                const subPatchTensor = imageTransforms(subPatchImageData, self.model.imageTransforms.mean, self.model.imageTransforms.std, self.model.tileSizeForModel)
+                subPatchTensors.push({
+                    subPatchParams: {
+                        topLeftX: patchParams.topLeftX + subPatchParamsOnCanvas.topLeftX,
+                        topLeftY: patchParams.topLeftY + subPatchParamsOnCanvas.topLeftY,
+                        width: subPatchParamsOnCanvas.width,
+                        height: subPatchParamsOnCanvas.height,
+                    },
+                    tensor: subPatchTensor
+                })
+            }
         }
     }
     return subPatchTensors

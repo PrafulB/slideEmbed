@@ -3,42 +3,65 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SlideEmbed</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.26.0/plotly.min.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <title>WSI Viewer with 3D Embeddings</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/openseadragon/4.1.0/openseadragon.min.js"></script>
     <script type="module" src="https://episphere.github.io/GeoTIFFTileSource-JPEG2k/GeoTIFFTileSource.js"></script>
-    <script type="module" src="index.js"></script>
+    <!-- <script src="https://cdnjs.cloudflare.com/ajax/libs/ml-matrix/6.10.4/ml-matrix.min.js"></script> -->
+    <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-gray-900 text-white">
-    <div class="container mx-auto p-2">
-        <h1 class="text-3xl font-bold mb-2 text-center">SlideEmbed: WSI Embeddings in your browser</h1>
+    <div class="container mx-auto p-4">
+        <h1 class="text-3xl font-bold mb-6 text-center">Whole Slide Image Viewer with 3D Embeddings</h1>
         
-        <div class="bg-gray-800 p-4 rounded-lg mb-3">
-            <h2 class="text-xl font-semibold mb-2">Load Image</h2>
-            <div class="">
-                <div class="flex">
-                    <label class="block text-sm my-auto font-medium my-auto pr-2">URL:</label>
-                    <input type="url" id="imageUrl" value="https://storage.googleapis.com/tcga-wsi-for-embedding/TCGA-KK-A6E6-11A-01-TSA.6028CB0D-530A-4ACB-872D-D64DDDC562DE.svs" placeholder="https://example.com/image.dzi" 
-                           class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white">
+        <!-- Input Section -->
+        <div class="bg-gray-800 p-4 rounded-lg mb-6">
+            <h2 class="text-xl font-semibold mb-4">Configuration</h2>
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <!-- Model Selection -->
+                <div>
+                    <label class="block text-sm font-medium mb-2">Embedding Model:</label>
+                    <select id="modelSelect" class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white">
+                        <option value="">Loading models...</option>
+                    </select>
                 </div>
-                <div class="text-center text-gray-400 mt-3">OR</div>
-                <div class="flex">
-                    <input type="file" id="localFile" accept="image/*" 
-                           class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white">
+                
+                <!-- Image Input -->
+                <div>
+                    <label class="block text-sm font-medium mb-2">Image Source:</label>
+                    <div class="flex space-x-2">
+                        <input type="url" id="imageUrl" placeholder="URL or drag file here" 
+                               class="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white text-sm">
+                        <input type="file" id="localFile" class="hidden">
+                        <button id="browseFile" class="bg-gray-600 hover:bg-gray-700 px-3 py-2 rounded-md text-sm whitespace-nowrap">
+                            Browse
+                        </button>
+                    </div>
                 </div>
-                <button id="loadImage" class="bg-blue-600 hover:bg-blue-700 px-6 py-1 mt-2 rounded-md font-medium">
-                    Load Image
-                </button>
+                
+                <!-- Actions -->
+                <div class="flex items-end space-x-2">
+                    <button id="loadImage" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-md font-medium text-sm">
+                        Load Image
+                    </button>
+                    <button id="generateEmbeddings" class="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-md text-sm">
+                        Generate Embeddings
+                    </button>
+                </div>
             </div>
         </div>
 
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <!-- OpenSeadragon Viewer -->
-            <div class="bg-gray-800 rounded-lg overflow-hidden">
-                <div class="p-2 border-b border-gray-700">
-                    <h3 class="text-lg font-semibold">Whole Slide Image Viewer</h3>
-                    <div class="flex space-x-2 mt-1">
+        <!-- Main Content -->
+        <div class="bg-gray-800 rounded-lg overflow-hidden">
+            <div class="p-4 border-b border-gray-700">
+                <div class="flex justify-between items-center">
+                    <div>
+                        <h3 class="text-lg font-semibold">Whole Slide Image Viewer</h3>
+                        <div class="text-sm text-gray-400 mt-1">Embedding heatmap overlayed on image</div>
+                    </div>
+                    <div class="flex space-x-2">
+                        <button id="toggleHeatmap" class="bg-indigo-600 hover:bg-indigo-700 px-3 py-1 rounded text-sm">
+                            Toggle Heatmap
+                        </button>
                         <button id="selectRegion" class="bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm">
                             Select Region
                         </button>
@@ -47,35 +70,35 @@
                         </button>
                     </div>
                 </div>
-                <div id="viewer" style="height: 600px; width: 100%;"></div>
             </div>
-
-            <!-- 3D Plot -->
-            <div class="bg-gray-800 rounded-lg overflow-hidden">
-                <div class="p-3 border-b border-gray-700">
-                    <h3 class="text-lg font-semibold">3D Embedding Visualization</h3>
-                    <div class="text-sm text-gray-400 mt-1">Click points to navigate to corresponding regions</div>
-                </div>
-                <div id="plot" style="height: 600px; width: 100%;"></div>
-            </div>
+            <div id="viewer" style="height: 700px; width: 100%;"></div>
         </div>
 
         <!-- Status and Controls -->
-        <div class="bg-gray-800 p-2 rounded-lg mt-2">
-            <div class="flex justify-between items-center">
+        <div class="bg-gray-800 p-4 rounded-lg mt-6">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-center">
                 <div>
                     <span class="text-sm text-gray-400">Status:</span>
-                    <span id="status" class="text-sm font-medium ml-2">Ready</span>
+                    <span id="status" class="text-sm font-medium ml-2 block">Ready</span>
                 </div>
                 <div>
                     <span class="text-sm text-gray-400">Embeddings:</span>
-                    <span id="embeddingCount" class="text-sm font-medium ml-2">0</span>
+                    <span id="embeddingCount" class="text-sm font-medium ml-2 block">0</span>
                 </div>
-                <button id="generateEmbeddings" class="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded text-sm">
-                    Generate Embeddings
-                </button>
+                <div>
+                    <span class="text-sm text-gray-400">Clusters:</span>
+                    <span id="clusterCount" class="text-sm font-medium ml-2 block">0</span>
+                </div>
+                <div class="flex space-x-2">
+                    <select id="clusteringMethod" class="px-2 py-1 bg-gray-700 border border-gray-600 rounded text-sm">
+                        <option value="kmeans">K-Means</option>
+                    </select>
+                    <input type="range" id="numClusters" min="2" max="20" value="8" class="slider">
+                </div>
             </div>
         </div>
     </div>
+    <script type="text/javascript" src="https://prafulb.github.io/fedEmbed/config.js"></script>
+    <script type="module" src="index.js"></script>
 </body>
 </html>

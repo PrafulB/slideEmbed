@@ -3,19 +3,23 @@ import { UMAP } from "https://esm.sh/umap-js"
 
 const patchEmbed = {}
 
-let viewer = null
-let worker = null
-let db = null
-let currentEmbeddings = []
-let currentPlotData = null
-let selectedRegion = null
-let isSelecting = false
-let selectionOverlay = null
-let hnswIndex = null
-
+let viewer = null;
+let worker = null;
+let db = null;
+let currentEmbeddings = [];
+let currentClusters = [];
+let selectedRegion = null;
+let isSelecting = false;
+let selectionOverlay = null;
+let hnswIndex = null;
+let heatmapOverlays = [];
+let heatmapVisible = true;
+let availableModels = [];
+let selectedModel = null;
 
 document.addEventListener('DOMContentLoaded', async () => {
     await initIndexedDB()
+    await loadModels();
     initViewer()
     initWorker()
     bindEvents()
@@ -105,7 +109,7 @@ async function setupImageBox3Instance(input) {
         patchEmbed.imagebox3Instance = new Imagebox3(input, numWorkers)
         await patchEmbed.imagebox3Instance.init()
     }
-    else {
+    else if (patchEmbed.imagebox3Instance.getImageSource()){
         await patchEmbed.imagebox3Instance.changeImageSource(input)
     }
 }
@@ -132,8 +136,8 @@ async function buildHNSWIndex(embeddings) {
         metadata: embeddings.map(e => ({
             x: e.patchTopLeftX,
             y: e.patchTopLeftY,
-            w: e.patchWidth,
-            h: e.patchHeight
+            w: e.width,
+            h: e.height
         }))
     }
 
@@ -160,7 +164,7 @@ async function runUMAP(vectors) {
     return patchEmbed.umapInstance.transform(vectors)
 }
 
-export async function retrieveEmbeddings(imageSource=patchEmbed.imagebox3Instance?.getImageSource(), lowerBound=[0,0], upperBound=[Infinity,Infinity]) {
+export async function retrieveEmbeddings(imageSource = patchEmbed.imagebox3Instance?.getImageSource(), lowerBound = [0, 0], upperBound = [Infinity, Infinity]) {
     const objectStore = db.transaction("embeddings", "readonly").objectStore("embeddings").index("imageId_x_y")
 
     return new Promise((resolve, reject) => {
@@ -174,7 +178,7 @@ export async function retrieveEmbeddings(imageSource=patchEmbed.imagebox3Instanc
                 reject("Malformed query")
             }
             let queryResult = []
-    
+
             const cursorSource = objectStore
             const range = IDBKeyRange.bound([imageSource, ...lowerBound], [imageSource, ...upperBound], true, true)
 
@@ -197,6 +201,234 @@ export async function retrieveEmbeddings(imageSource=patchEmbed.imagebox3Instanc
     })
 }
 
+// Load available models from config
+async function loadModels() {
+    try {
+        // For demo purposes, using hardcoded models
+        // In production, fetch from config.json
+        availableModels = SUPPORTED_MODELS
+
+        // Uncomment this line to load from config.json in production:
+        // const response = await fetch('config.json');
+        // availableModels = await response.json();
+
+        populateModelDropdown();
+    } catch (error) {
+        console.error('Failed to load models:', error);
+        updateStatus('Failed to load model configurations');
+    }
+}
+
+// Populate model dropdown
+function populateModelDropdown() {
+    const select = document.getElementById('modelSelect');
+    select.innerHTML = '<option value="">Select a model...</option>';
+
+    availableModels.filter(model => model.enabled).forEach(model => {
+        const option = document.createElement('option');
+        option.value = model.modelName;
+        option.textContent = `${model.modelName} (${model.embeddingDimension}D)`;
+        select.appendChild(option);
+    });
+
+    // Auto-select first model
+    if (availableModels.length > 0) {
+        select.value = availableModels[0].modelName;
+        selectedModel = availableModels[0];
+    }
+}
+
+// K-means clustering implementation
+function kMeansCluster(embeddings, k) {
+    const points = embeddings.result.map(e => e.embedding);
+    const n = points.length;
+    const dim = points[0].length;
+
+    // Initialize centroids randomly
+    let centroids = [];
+    for (let i = 0; i < k; i++) {
+        centroids.push(points[Math.floor(Math.random() * n)].slice());
+    }
+
+    let assignments = new Array(n);
+    let changed = true;
+    let iterations = 0;
+    const maxIterations = 100;
+
+    while (changed && iterations < maxIterations) {
+        changed = false;
+        iterations++;
+
+        // Assign points to nearest centroid
+        for (let i = 0; i < n; i++) {
+            let bestCluster = 0;
+            let bestDistance = Infinity;
+
+            for (let j = 0; j < k; j++) {
+                const distance = euclideanDistance(points[i], centroids[j]);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    bestCluster = j;
+                }
+            }
+
+            if (assignments[i] !== bestCluster) {
+                assignments[i] = bestCluster;
+                changed = true;
+            }
+        }
+
+        // Update centroids
+        for (let j = 0; j < k; j++) {
+            const clusterPoints = [];
+            for (let i = 0; i < n; i++) {
+                if (assignments[i] === j) {
+                    clusterPoints.push(points[i]);
+                }
+            }
+
+            if (clusterPoints.length > 0) {
+                for (let d = 0; d < dim; d++) {
+                    centroids[j][d] = clusterPoints.reduce((sum, p) => sum + p[d], 0) / clusterPoints.length;
+                }
+            }
+        }
+    }
+
+    return assignments;
+}
+
+function euclideanDistance(a, b) {
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) {
+        sum += (a[i] - b[i]) ** 2;
+    }
+    return Math.sqrt(sum);
+}
+
+// Run clustering and create heatmap
+async function runClusteringAndHeatmap(embeddings) {
+    updateStatus('Running clustering...');
+
+    const method = document.getElementById('clusteringMethod').value;
+    const numClusters = parseInt(document.getElementById('numClusters').value);
+
+    let clusterAssignments;
+
+    switch (method) {
+        case 'kmeans':
+            clusterAssignments = kMeansCluster(embeddings, numClusters);
+            break;
+        case 'hierarchical':
+            // Simplified hierarchical clustering
+            clusterAssignments = embeddings.result.map((_, i) => i % numClusters);
+            break;
+        case 'density':
+            // Simplified density-based clustering
+            clusterAssignments = embeddings.result.map((_, i) => Math.floor(i / Math.ceil(embeddings.result.length / numClusters)));
+            break;
+        default:
+            clusterAssignments = kMeansCluster(embeddings, numClusters);
+    }
+
+    // Create cluster data
+    currentClusters = embeddings.result.map((embedding, i) => ({
+        ...embedding,
+        cluster: clusterAssignments[i]
+    }));
+
+    // Create heatmap overlay
+    createHeatmapOverlay(currentClusters, numClusters);
+
+    updateClusterCount(numClusters);
+}
+
+// Create heatmap overlay on the viewer
+function createHeatmapOverlay(clusters, numClusters) {
+    // Clear existing overlays
+    clearHeatmapOverlays();
+
+    // Generate colors for clusters
+    const colors = generateClusterColors(numClusters);
+
+    clusters.forEach(patch => {
+        const element = document.createElement('div');
+        const color = colors[patch.cluster];
+
+        element.style.backgroundColor = `rgba(${color.r}, ${color.g}, ${color.b}, 0.5)`;
+        // element.style.border = `1px solid rgba(${color.r}, ${color.g}, ${color.b}, 0.8)`;
+        element.style.pointerEvents = 'none';
+        element.style.transition = 'opacity 0.3s';
+        element.className = 'heatmap-patch';
+
+        const rect = viewer.viewport.imageToViewportRectangle(new OpenSeadragon.Rect(
+            patch.topLeftX,
+            patch.topLeftY,
+            patch.width,
+            patch.height
+        ));
+
+        viewer.addOverlay(element, rect);
+        heatmapOverlays.push(element);
+    });
+}
+
+// Generate distinct colors for clusters
+function generateClusterColors(numClusters) {
+    const colors = [];
+    for (let i = 0; i < numClusters; i++) {
+        const hue = (i * 360) / numClusters;
+        const rgb = hslToRgb(hue / 360, 0.7, 0.5);
+        colors.push({ r: rgb[0], g: rgb[1], b: rgb[2], a:0.5 });
+    }
+    return colors;
+}
+
+function hslToRgb(h, s, l) {
+    let r, g, b;
+    if (s === 0) {
+        r = g = b = l;
+    } else {
+        const hue2rgb = (p, q, t) => {
+            if (t < 0) t += 1;
+            if (t > 1) t -= 1;
+            if (t < 1 / 6) return p + (q - p) * 6 * t;
+            if (t < 1 / 2) return q;
+            if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+            return p;
+        };
+        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        const p = 2 * l - q;
+        r = hue2rgb(p, q, h + 1 / 3);
+        g = hue2rgb(p, q, h);
+        b = hue2rgb(p, q, h - 1 / 3);
+    }
+    return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+
+// Clear heatmap overlays
+function clearHeatmapOverlays() {
+    heatmapOverlays.forEach(overlay => {
+        viewer.removeOverlay(overlay);
+    });
+    heatmapOverlays = [];
+}
+
+// Toggle heatmap visibility
+function toggleHeatmap() {
+    heatmapVisible = !heatmapVisible;
+    const button = document.getElementById('toggleHeatmap');
+
+    heatmapOverlays.forEach(overlay => {
+        overlay.style.display = heatmapVisible ? 'block' : 'none';
+    });
+
+    button.textContent = heatmapVisible ? 'Hide Heatmap' : 'Show Heatmap';
+    button.className = heatmapVisible ?
+        'bg-indigo-600 hover:bg-indigo-700 px-3 py-1 rounded text-sm' :
+        'bg-gray-600 hover:bg-gray-700 px-3 py-1 rounded text-sm';
+}
+
 async function runUMAPAndPlot() {
     updateStatus('Running UMAP...')
 
@@ -207,7 +439,7 @@ async function runUMAPAndPlot() {
     const z = umapResults.map(p => p[2])
 
     const text = embeddings.map((e, i) =>
-        `Patch ${i}<br>X: ${e.patchTopLeftX}<br>Y: ${e.patchTopLeftY}<br>Size: ${e.patchWidth}x${e.patchHeight}`
+        `Patch ${i}<br>X: ${e.patchTopLeftX}<br>Y: ${e.patchTopLeftY}<br>Size: ${e.width}x${e.height}`
     )
 
     const plotData = [{
@@ -249,7 +481,7 @@ async function runUMAPAndPlot() {
         const pointIndex = data.points[0].pointIndex
         const embedding = embeddings[pointIndex]
         showTile(embedding.patchTopLeftX, embedding.patchTopLeftY,
-            embedding.patchWidth, embedding.patchHeight)
+            embedding.width, embedding.height)
     })
 
     currentPlotData = { data: plotData, embeddings: embeddings }
@@ -338,89 +570,204 @@ function updateSelectionOverlay(startX, startY, endX, endY) {
     selectionOverlay = element
 }
 
+// Process selected region
 async function processSelectedRegion() {
-    if (!selectedRegion || !currentEmbeddings.length) return
+    if (!selectedRegion || !currentClusters.length) return;
 
-    const minX = Math.min(selectedRegion.startX, selectedRegion.endX)
-    const maxX = Math.max(selectedRegion.startX, selectedRegion.endX)
-    const minY = Math.min(selectedRegion.startY, selectedRegion.endY)
-    const maxY = Math.max(selectedRegion.startY, selectedRegion.endY)
+    const minX = Math.min(selectedRegion.startX, selectedRegion.endX);
+    const maxX = Math.max(selectedRegion.startX, selectedRegion.endX);
+    const minY = Math.min(selectedRegion.startY, selectedRegion.endY);
+    const maxY = Math.max(selectedRegion.startY, selectedRegion.endY);
 
-    const selectedPatches = currentEmbeddings.filter(patch => {
-        const patchCenterX = patch.patchTopLeftX + patch.patchWidth / 2
-        const patchCenterY = patch.patchTopLeftY + patch.patchHeight / 2
+    // Find patches in selected region
+    const selectedPatches = currentClusters.filter(patch => {
+        const patchCenterX = patch.patchTopLeftX + patch.width / 2;
+        const patchCenterY = patch.patchTopLeftY + patch.height / 2;
         return patchCenterX >= minX && patchCenterX <= maxX &&
-            patchCenterY >= minY && patchCenterY <= maxY
-    })
+            patchCenterY >= minY && patchCenterY <= maxY;
+    });
 
-    if (selectedPatches.length === 0) return
+    if (selectedPatches.length === 0) return;
 
-    highlightPlotPoints(selectedPatches)
+    // Highlight selected patches in the heatmap
+    highlightSelectedPatches(selectedPatches);
 
-    await findSimilarPatches(selectedPatches)
+    // Find similar patches
+    await findSimilarPatches(selectedPatches);
 }
 
-function highlightPlotPoints(patches) {
-    if (!currentPlotData) return
+// async function processSelectedRegion() {
+//     if (!selectedRegion || !currentEmbeddings.length) return
 
-    const highlightIndices = patches.map(patch =>
-        currentEmbeddings.findIndex(e => e === patch)
-    ).filter(index => index !== -1)
+//     const minX = Math.min(selectedRegion.startX, selectedRegion.endX)
+//     const maxX = Math.max(selectedRegion.startX, selectedRegion.endX)
+//     const minY = Math.min(selectedRegion.startY, selectedRegion.endY)
+//     const maxY = Math.max(selectedRegion.startY, selectedRegion.endY)
 
-    const colors = currentPlotData.data[0].marker.color.map((_, i) =>
-        highlightIndices.includes(i) ? 'red' : 'blue'
-    )
+//     const selectedPatches = currentEmbeddings.filter(patch => {
+//         const patchCenterX = patch.patchTopLeftX + patch.width / 2
+//         const patchCenterY = patch.patchTopLeftY + patch.height / 2
+//         return patchCenterX >= minX && patchCenterX <= maxX &&
+//             patchCenterY >= minY && patchCenterY <= maxY
+//     })
 
-    Plotly.restyle('plot', { 'marker.color': [colors] }, [0])
+//     if (selectedPatches.length === 0) return
+
+//     highlightPlotPoints(selectedPatches)
+
+//     await findSimilarPatches(selectedPatches)
+// }
+
+// function highlightPlotPoints(patches) {
+//     if (!currentPlotData) return
+
+//     const highlightIndices = patches.map(patch =>
+//         currentEmbeddings.findIndex(e => e === patch)
+//     ).filter(index => index !== -1)
+
+//     const colors = currentPlotData.data[0].marker.color.map((_, i) =>
+//         highlightIndices.includes(i) ? 'red' : 'blue'
+//     )
+
+//     Plotly.restyle('plot', { 'marker.color': [colors] }, [0])
+// }
+
+// Highlight selected patches in the heatmap
+function highlightSelectedPatches(patches) {
+    // Reset all patch opacities
+    heatmapOverlays.forEach(overlay => {
+        overlay.style.opacity = '0.3';
+    });
+
+    // Highlight selected patches
+    patches.forEach(patch => {
+        const patchIndex = currentClusters.findIndex(c =>
+            c.patchTopLeftX === patch.patchTopLeftX && c.patchTopLeftY === patch.patchTopLeftY
+        );
+        if (patchIndex >= 0 && heatmapOverlays[patchIndex]) {
+            heatmapOverlays[patchIndex].style.opacity = '1.0';
+            heatmapOverlays[patchIndex].style.border = '3px solid #FBBF24';
+        }
+    });
 }
 
+// Find similar patches using simple similarity
 async function findSimilarPatches(selectedPatches) {
-    if (selectedPatches.length === 0) return
+    if (selectedPatches.length === 0) return;
 
-    const avgEmbedding = new Array(selectedPatches[0].embedding.length).fill(0)
+    // Calculate average embedding of selected patches
+    const avgEmbedding = new Array(selectedPatches[0].embedding.length).fill(0);
     selectedPatches.forEach(patch => {
         patch.embedding.forEach((val, i) => {
-            avgEmbedding[i] += val / selectedPatches.length
-        })
-    })
+            avgEmbedding[i] += val / selectedPatches.length;
+        });
+    });
 
-    const similarities = currentEmbeddings.map(patch => {
-        let dotProduct = 0, normA = 0, normB = 0
+    // Find similar patches using cosine similarity
+    const similarities = currentClusters.map(patch => {
+        let dotProduct = 0, normA = 0, normB = 0;
         patch.embedding.forEach((val, i) => {
-            dotProduct += val * avgEmbedding[i]
-            normA += val * val
-            normB += avgEmbedding[i] * avgEmbedding[i]
-        })
-        return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB))
-    })
+            dotProduct += val * avgEmbedding[i];
+            normA += val * val;
+            normB += avgEmbedding[i] * avgEmbedding[i];
+        });
+        return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+    });
 
-    const threshold = 0.7
-    const similarPatches = currentEmbeddings.filter((_, i) => similarities[i] > threshold)
+    // Get top similar patches
+    const threshold = 0.7;
+    const similarPatches = currentClusters.filter((_, i) => similarities[i] > threshold);
 
+    // Highlight similar regions on viewer
     similarPatches.forEach(patch => {
-        const element = document.createElement('div')
-        element.style.border = '2px solid #F59E0B'
-        element.style.backgroundColor = 'rgba(245, 158, 11, 0.3)'
-        element.style.pointerEvents = 'none'
+        const patchIndex = currentClusters.findIndex(c => c === patch);
+        if (patchIndex >= 0 && heatmapOverlays[patchIndex]) {
+            heatmapOverlays[patchIndex].style.border = '3px solid #10B981';
+            heatmapOverlays[patchIndex].style.opacity = '1.0';
 
-        const rect = new OpenSeadragon.Rect(
-            patch.patchTopLeftX, patch.patchTopLeftY,
-            patch.patchWidth, patch.patchHeight
-        )
-
-        viewer.addOverlay(element, rect)
-
-        setTimeout(() => {
-            viewer.removeOverlay(element)
-        }, 5000)
-    })
+            setTimeout(() => {
+                const originalColor = generateClusterColors(Math.max(...currentClusters.map(c => c.cluster)) + 1)[patch.cluster];
+                heatmapOverlays[patchIndex].style.border = `1px solid rgba(${originalColor.r}, ${originalColor.g}, ${originalColor.b}, 0.8)`;
+                heatmapOverlays[patchIndex].style.opacity = '0.6';
+            }, 3000);
+        }
+    });
 }
+
+// async function findSimilarPatches(selectedPatches) {
+//     if (selectedPatches.length === 0) return
+
+//     const avgEmbedding = new Array(selectedPatches[0].embedding.length).fill(0)
+//     selectedPatches.forEach(patch => {
+//         patch.embedding.forEach((val, i) => {
+//             avgEmbedding[i] += val / selectedPatches.length
+//         })
+//     })
+
+//     const similarities = currentEmbeddings.map(patch => {
+//         let dotProduct = 0, normA = 0, normB = 0
+//         patch.embedding.forEach((val, i) => {
+//             dotProduct += val * avgEmbedding[i]
+//             normA += val * val
+//             normB += avgEmbedding[i] * avgEmbedding[i]
+//         })
+//         return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB))
+//     })
+
+//     const threshold = 0.7
+//     const similarPatches = currentEmbeddings.filter((_, i) => similarities[i] > threshold)
+
+//     similarPatches.forEach(patch => {
+//         const element = document.createElement('div')
+//         element.style.border = '2px solid #F59E0B'
+//         element.style.backgroundColor = 'rgba(245, 158, 11, 0.3)'
+//         element.style.pointerEvents = 'none'
+
+//         const rect = new OpenSeadragon.Rect(
+//             patch.patchTopLeftX, patch.patchTopLeftY,
+//             patch.width, patch.height
+//         )
+
+//         viewer.addOverlay(element, rect)
+
+//         setTimeout(() => {
+//             viewer.removeOverlay(element)
+//         }, 5000)
+//     })
+// }
 
 function bindEvents() {
     document.getElementById('loadImage').addEventListener('click', loadImage)
-    document.getElementById('generateEmbeddings').addEventListener('click', generateEmbeddings)
+    document.getElementById('generateEmbeddings').addEventListener('click', generateEmbeddingsHandler)
     document.getElementById('selectRegion').addEventListener('click', toggleSelection)
-    document.getElementById('clearSelection').addEventListener('click', clearSelection)
+    document.getElementById('loadImage').addEventListener('click', loadImage);
+    document.getElementById('clearSelection').addEventListener('click', clearSelection);
+    document.getElementById('toggleHeatmap').addEventListener('click', toggleHeatmap);
+    document.getElementById('browseFile').addEventListener('click', () => {
+        document.getElementById('localFile').click();
+    });
+    document.getElementById('localFile').addEventListener('change', handleFileSelect);
+    document.getElementById('modelSelect').addEventListener('change', handleModelChange);
+    document.getElementById('clusteringMethod').addEventListener('change', updateClustering);
+    document.getElementById('numClusters').addEventListener('input', updateClustering);
+
+    // Add drag and drop functionality
+    const urlInput = document.getElementById('imageUrl');
+    urlInput.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        urlInput.style.borderColor = '#3B82F6';
+    });
+    urlInput.addEventListener('dragleave', (e) => {
+        urlInput.style.borderColor = '#6B7280';
+    });
+    urlInput.addEventListener('drop', (e) => {
+        e.preventDefault();
+        urlInput.style.borderColor = '#6B7280';
+        if (e.dataTransfer.files.length > 0) {
+            document.getElementById('localFile').files = e.dataTransfer.files;
+            handleFileSelect({ target: { files: e.dataTransfer.files } });
+        }
+    });
 }
 
 async function loadImage() {
@@ -442,15 +789,18 @@ async function loadImage() {
     if (tileSource) {
         viewer.open(tileSource)
         updateStatus('Image loaded')
+        document.getElementById("generateEmbeddings").removeAttribute('disabled')
     } else {
         updateStatus('Failed to load image')
+        document.getElementById("generateEmbeddings").setAttribute('disabled', true)
     }
 }
 
-async function getTissueRegions(gridDim = 16) {
+async function getTissueRegions(cellWidth=2048, cellHeight=2048) {
     if (!patchEmbed.imagebox3Instance) return
     console.time("thumbnail")
     const imageInfo = await patchEmbed.imagebox3Instance.getInfo()
+    const {width: imageWidth, height: imageHeight} = imageInfo
     const thumbnailBlob = await patchEmbed.imagebox3Instance.getThumbnail(512, 512)
     const thumbnailURL = URL.createObjectURL(thumbnailBlob)
     console.timeEnd("thumbnail")
@@ -460,20 +810,22 @@ async function getTissueRegions(gridDim = 16) {
         thumbnailImg.onload = () => {
             const thumbnailWidth = thumbnailImg.naturalWidth
             const thumbnailHeight = thumbnailImg.naturalHeight
-            const thumbnailRegions = Array(gridDim)
+            const gridRowDim = Math.ceil(imageWidth/cellWidth)
+            const gridColDim = Math.ceil(imageHeight/cellHeight)
+            const thumbnailRegions = Array(gridRowDim)
                 .fill(undefined)
                 .map((row, rowIdx) =>
-                    Array(gridDim)
+                    Array(gridColDim)
                         .fill(undefined)
                         .map((col, colIdx) => [
-                            (thumbnailWidth * rowIdx) / gridDim,
-                            (thumbnailHeight * colIdx) / gridDim
+                            (thumbnailWidth * rowIdx) / gridRowDim,
+                            (thumbnailHeight * colIdx) / gridColDim
                         ])
                 )
                 .flat()
             const offscreenCanvas = new OffscreenCanvas(
-                thumbnailWidth / gridDim,
-                thumbnailHeight / gridDim
+                thumbnailWidth / gridRowDim,
+                thumbnailHeight / gridColDim
             )
 
             const tissueRegions = thumbnailRegions.map(([x, y]) => {
@@ -500,8 +852,8 @@ async function getTissueRegions(gridDim = 16) {
                 return {
                     topLeftX,
                     topLeftY,
-                    width: Math.floor(imageInfo.width / gridDim),
-                    height: Math.floor(imageInfo.height / gridDim),
+                    width: cellWidth,
+                    height: cellHeight,
                     ...tileContent
                 }
             })
@@ -514,7 +866,7 @@ async function getTissueRegions(gridDim = 16) {
 
 }
 
-const isTileEmpty = (canvas, ctx, threshold = 0.9, returnEmptyProportion = false) => {
+const isTileEmpty = (canvas, ctx, threshold = 0.95, returnEmptyProportion = false) => {
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
     const pixels = imageData.data
     const numPixels = pixels.length / 4
@@ -554,7 +906,7 @@ const addViewerOverlay = (tileParams) => {
     if (viewer) {
         const existingOverlay = document.getElementById("runtime-patch-overlay")
         if (existingOverlay) viewer.removeOverlay(existingOverlay)
-    
+
         const elt = document.createElement("div")
         elt.id = "runtime-patch-overlay"
         elt.className = "highlight"
@@ -567,7 +919,7 @@ const addViewerOverlay = (tileParams) => {
 
 const generatePatchEmbeddings = async (imageSource, modelIdentifier, tissueRegions, tissueRegionIndex = 0, patchResolution = 256) => {
     console.log(`Embedded ${(await retrieveEmbeddings(imageSource)).result.length} patches for current image.`)
-    console.log(`Starting tissue region ${tissueRegionIndex+1}/${tissueRegions.length}...`)
+    console.log(`Starting tissue region ${tissueRegionIndex + 1}/${tissueRegions.length}...`)
     try {
         const { emptyProportion, isEmpty, ...patchParams } = tissueRegions[tissueRegionIndex]
         const patchURL = await getImageTile([
@@ -623,7 +975,15 @@ const generatePatchEmbeddings = async (imageSource, modelIdentifier, tissueRegio
     }
 }
 
-export async function generateEmbeddings(imageSource, modelIdentifier="CTransPath") {
+function generateEmbeddingsHandler() {
+    if (!patchEmbed.imagebox3Instance) {
+        alert("Please load the image first!")
+        return
+    }
+    return generateEmbeddings(patchEmbed.imagebox3Instance.getImageSource(), document.getElementById('modelSelect').value)
+}
+
+export async function generateEmbeddings(imageSource, modelIdentifier = "CTransPath") {
     if (!patchEmbed.imagebox3Instance && !imageSource) {
         alert("Please load the image first!")
         return
@@ -647,7 +1007,7 @@ export async function generateEmbeddings(imageSource, modelIdentifier="CTransPat
         document.addEventListener('allEmbeddingsGenerated', async () => {
             console.timeEnd("allEmbeddings")
             const allEmbeddings = await retrieveEmbeddings()
-            resolve(allEmbeddings)
+            await runClusteringAndHeatmap(allEmbeddings);
         })
     })
 }
@@ -667,31 +1027,31 @@ function toggleSelection() {
     }
 }
 
-function clearSelection() {
-    selectedRegion = null
-    isSelecting = false
+// function clearSelection() {
+//     selectedRegion = null
+//     isSelecting = false
 
-    if (selectionOverlay) {
-        viewer.removeOverlay(selectionOverlay)
-        selectionOverlay = null
-    }
+//     if (selectionOverlay) {
+//         viewer.removeOverlay(selectionOverlay)
+//         selectionOverlay = null
+//     }
 
-    viewer.clearOverlays()
+//     viewer.clearOverlays()
 
-    if (currentPlotData) {
-        const colors = currentPlotData.data[0].z
-        Plotly.restyle('plot', { 'marker.color': [colors] }, [0])
-    }
+//     if (currentPlotData) {
+//         const colors = currentPlotData.data[0].z
+//         Plotly.restyle('plot', { 'marker.color': [colors] }, [0])
+//     }
 
-    const button = document.getElementById('selectRegion')
-    button.textContent = 'Select Region'
-    button.className = 'bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm'
+//     const button = document.getElementById('selectRegion')
+//     button.textContent = 'Select Region'
+//     button.className = 'bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm'
 
-    updateStatus('Selection cleared')
-}
+//     updateStatus('Selection cleared')
+// }
 
 function updateStatus(message) {
-    if (document?.getElementById('status')?.textContent) 
+    if (document?.getElementById('status')?.textContent)
         document.getElementById('status').textContent = message
 }
 
@@ -725,8 +1085,62 @@ function countIDBRecords() {
 
 async function updateEmbeddingCount() {
     const numEmbeddings = await countIDBRecords()
-    if(document?.getElementById('embeddingCount')?.textContent)
+    if (document?.getElementById('embeddingCount')?.textContent)
         document.getElementById('embeddingCount').textContent = numEmbeddings
 }
 
+// Update clustering when parameters change
+async function updateClustering() {
+    const currentEmbeddings = await retrieveEmbeddings()
+    if (currentEmbeddings.result.length > 0) {
+        runClusteringAndHeatmap(currentEmbeddings);
+    }
+}
 
+function handleModelChange(event) {
+    const modelId = parseInt(event.target.value);
+    selectedModel = availableModels.find(m => m.modelId === modelId);
+    if (selectedModel) {
+        updateStatus(`Selected model: ${selectedModel.modelName}`);
+    }
+}
+
+// Clear selection
+function clearSelection() {
+    selectedRegion = null;
+    isSelecting = false;
+
+    if (selectionOverlay) {
+        viewer.removeOverlay(selectionOverlay);
+        selectionOverlay = null;
+    }
+
+    // Reset heatmap patch appearances
+    heatmapOverlays.forEach((overlay, i) => {
+        if (currentClusters[i]) {
+            const colors = generateClusterColors(Math.max(...currentClusters.map(c => c.cluster)) + 1);
+            const color = colors[currentClusters[i].cluster];
+            // overlay.style.opacity = '0.2';
+            // overlay.style.border = `1px solid rgba(${color.r}, ${color.g}, ${color.b}, 0.2)`;
+        }
+    });
+
+    const button = document.getElementById('selectRegion');
+    button.textContent = 'Select Region';
+    button.className = 'bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm';
+
+    updateStatus('Selection cleared');
+}
+
+function updateClusterCount(count) {
+    document.getElementById('clusterCount').textContent = count;
+}
+
+ // Handle file selection
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                document.getElementById('imageUrl').placeholder = `File selected: ${file.name}`;
+                document.getElementById('imageUrl').value = '';
+            }
+        }
