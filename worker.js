@@ -89,16 +89,17 @@ const getSubPatchTensors = (patchParams, bitmap) => {
     //V.IMP TODO: Check that the border tiles (with width or height less than tileSizeForModel) are not being
     // stretched inordinately and creating bad embeddings.
     const oc = new OffscreenCanvas(
-        (bitmap.width * self.model.tileSizeForModel) /
-        self.model.tileResolution,
-        (bitmap.height * self.model.tileSizeForModel) /
-        self.model.tileResolution
+        Math.ceil((bitmap.width * self.model.tileSizeForModel) /
+        self.model.tileResolution),
+        Math.ceil((bitmap.height * self.model.tileSizeForModel) /
+        self.model.tileResolution)
     )
+    // console.log(bitmap.width, bitmap.height, oc.width, oc.height)
     const ctx = oc.getContext("2d", { willReadFrequently: true })
     ctx.drawImage(bitmap, 0, 0, oc.width, oc.height)
     const subPatchTensors = []
-    for (let i = 0; i < Math.ceil(bitmap.height / self.model.tileResolution); i++) {
-        for (let j = 0; j < Math.ceil(bitmap.width / self.model.tileResolution); j++) {
+    for (let i = 0; i < Math.ceil(oc.height / self.model.tileSizeForModel); i++) {
+        for (let j = 0; j < Math.ceil(oc.width / self.model.tileSizeForModel); j++) {
             const subPatchParamsOnCanvas = {
                 topLeftX: j * self.model.tileSizeForModel,
                 topLeftY: i * self.model.tileSizeForModel,
@@ -142,6 +143,7 @@ const getEmbeddingFromTensor = async (imageTensor) => {
 
 async function generateEmbeddings(patchParams, bitmap) {
     const subPatchTensors = await getSubPatchTensors(patchParams, bitmap)
+
     const patchEmbeddings = []
     for (const subPatch of subPatchTensors) {
         const patchEmbedding = await getEmbeddingFromTensor(subPatch.tensor)
@@ -166,9 +168,13 @@ async function initIndexedDB() {
     })
 }
 
-async function storeEmbeddings(imageId, patchData) {
+async function storeEmbeddings(imageSource, patchData) {
     if (!self.db) {
         await initIndexedDB()
+    }
+    let imageId = imageSource
+    if (imageId instanceof File) {
+        imageId = imageId.name
     }
 
     return new Promise((resolve, reject) => {

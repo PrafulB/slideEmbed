@@ -95,7 +95,7 @@ async function handleWorkerMessage(e) {
             const allEmbeddingsGeneratedEvent = new CustomEvent('allEmbeddingsGenerated')
             document.dispatchEvent(allEmbeddingsGeneratedEvent)
         } else {
-            updateStatus('Embeddings generated for current patch, moving to next...')
+            updateStatus('Successful, moving to next patch...')
         }
     } else {
         console.error('Worker error:', error)
@@ -109,7 +109,7 @@ async function setupImageBox3Instance(input) {
         patchEmbed.imagebox3Instance = new Imagebox3(input, numWorkers)
         await patchEmbed.imagebox3Instance.init()
     }
-    else if (patchEmbed.imagebox3Instance.getImageSource()){
+    else if (patchEmbed.imagebox3Instance.getImageSource()) {
         await patchEmbed.imagebox3Instance.changeImageSource(input)
     }
 }
@@ -164,9 +164,13 @@ async function runUMAP(vectors) {
     return patchEmbed.umapInstance.transform(vectors)
 }
 
-export async function retrieveEmbeddings(imageSource = patchEmbed.imagebox3Instance?.getImageSource(), lowerBound = [0, 0], upperBound = [Infinity, Infinity]) {
+export async function retrieveEmbeddings(image = patchEmbed.imagebox3Instance?.getImageSource(), lowerBound = [0, 0], upperBound = [Infinity, Infinity]) {
+    let imageSource = image
+    if (imageSource instanceof File) {
+        imageSource = imageSource.name
+    }
     const objectStore = db.transaction("embeddings", "readonly").objectStore("embeddings").index("imageId_x_y")
-
+    
     return new Promise((resolve, reject) => {
 
         if (!imageSource) {
@@ -351,7 +355,8 @@ function createHeatmapOverlay(clusters, numClusters) {
     // Generate colors for clusters
     const colors = generateClusterColors(numClusters);
 
-    clusters.forEach(patch => {
+    for (let patch of clusters) {
+
         const element = document.createElement('div');
         const color = colors[patch.cluster];
 
@@ -370,7 +375,15 @@ function createHeatmapOverlay(clusters, numClusters) {
 
         viewer.addOverlay(element, rect);
         heatmapOverlays.push(element);
-    });
+    };
+
+    // const problematic = viewer.currentOverlays.slice(-1)[0].element.computedStyleMap().getAll('background-color')[0].toString()
+    // const reds = viewer.currentOverlays.filter(o =>
+    //     o.element.computedStyleMap().getAll('background-color')[0].toString() === problematic
+    // )
+    // reds.forEach(o => {
+    //     viewer.removeOverlay(o.element)
+    // })
 }
 
 // Generate distinct colors for clusters
@@ -379,7 +392,7 @@ function generateClusterColors(numClusters) {
     for (let i = 0; i < numClusters; i++) {
         const hue = (i * 360) / numClusters;
         const rgb = hslToRgb(hue / 360, 0.7, 0.5);
-        colors.push({ r: rgb[0], g: rgb[1], b: rgb[2], a:0.5 });
+        colors.push({ r: rgb[0], g: rgb[1], b: rgb[2], a: 0.5 });
     }
     return colors;
 }
@@ -796,11 +809,11 @@ async function loadImage() {
     }
 }
 
-async function getTissueRegions(cellWidth=2048, cellHeight=2048) {
+async function getTissueRegions(cellWidth = 224*8, cellHeight = 224*8) {
     if (!patchEmbed.imagebox3Instance) return
     console.time("thumbnail")
     const imageInfo = await patchEmbed.imagebox3Instance.getInfo()
-    const {width: imageWidth, height: imageHeight} = imageInfo
+    const { width: imageWidth, height: imageHeight } = imageInfo
     const thumbnailBlob = await patchEmbed.imagebox3Instance.getThumbnail(512, 512)
     const thumbnailURL = URL.createObjectURL(thumbnailBlob)
     console.timeEnd("thumbnail")
@@ -810,8 +823,8 @@ async function getTissueRegions(cellWidth=2048, cellHeight=2048) {
         thumbnailImg.onload = () => {
             const thumbnailWidth = thumbnailImg.naturalWidth
             const thumbnailHeight = thumbnailImg.naturalHeight
-            const gridRowDim = Math.ceil(imageWidth/cellWidth)
-            const gridColDim = Math.ceil(imageHeight/cellHeight)
+            const gridRowDim = Math.ceil(imageWidth / cellWidth)
+            const gridColDim = Math.ceil(imageHeight / cellHeight)
             const thumbnailRegions = Array(gridRowDim)
                 .fill(undefined)
                 .map((row, rowIdx) =>
@@ -844,11 +857,11 @@ async function getTissueRegions(cellWidth=2048, cellHeight=2048) {
                 const tileContent = isTileEmpty(
                     offscreenCanvas,
                     offscreenCtx,
-                    0.8,
+                    0.95,
                     true
                 )
-                const topLeftX = Math.floor((x * imageInfo.width) / thumbnailWidth)
-                const topLeftY = Math.floor((y * imageInfo.height) / thumbnailHeight)
+                const topLeftX = Math.floor((x * imageWidth) / thumbnailWidth)
+                const topLeftY = Math.floor((y * imageHeight) / thumbnailHeight)
                 return {
                     topLeftX,
                     topLeftY,
@@ -858,8 +871,9 @@ async function getTissueRegions(cellWidth=2048, cellHeight=2048) {
                 }
             })
                 .filter((tile) => !tile.isEmpty)
-                .sort((a, b) => a.emptyProportion - b.emptyProportion)
+            // .sort((a, b) => a.emptyProportion - b.emptyProportion)
             resolve(tissueRegions)
+            URL.revokeObjectURL(thumbnailURL)
         }
         thumbnailImg.src = thumbnailURL
     })
@@ -902,14 +916,36 @@ const getImageTile = async (tileParams) => {
     return tileURL
 }
 
-const addViewerOverlay = (tileParams) => {
+const addViewerOverlay = (tileParams, processing = false, removePrevious = true) => {
     if (viewer) {
-        const existingOverlay = document.getElementById("runtime-patch-overlay")
-        if (existingOverlay) viewer.removeOverlay(existingOverlay)
+        if (removePrevious) {
+            const existingOverlay = document.getElementById("runtime-patch-overlay")
+            if (existingOverlay) viewer.removeOverlay(existingOverlay)
+        }
 
         const elt = document.createElement("div")
+        // elt.innerText = `${tileParams.topLeftX},${tileParams.topLeftY}`
         elt.id = "runtime-patch-overlay"
-        elt.className = "highlight"
+        elt.className = "highlight border-4 border-dashed border-blue-300 transition ease-linear delay-0 duration-700"
+
+        if (processing) {
+            const addAndRemoveClass = () => {
+                elt.classList.add("bg-cyan-500/25")
+                setTimeout(() => elt.classList.remove("bg-cyan-500/25"), 500)
+            }
+            const changeClassPeriodically = setInterval(addAndRemoveClass, 1000)
+
+            const handleOverlayRemoval = () => {
+                viewer.addOnceHandler('remove-overlay', (e) => {
+                    if (e.element.id === elt.id) {
+                        clearInterval(changeClassPeriodically)
+                    } else {
+                        handleOverlayRemoval()
+                    }
+                })
+            }
+            handleOverlayRemoval()
+        }
         viewer.addOverlay({
             element: elt,
             location: viewer.viewport.imageToViewportRectangle(tileParams.topLeftX, tileParams.topLeftY, tileParams.width, tileParams.height)
@@ -926,7 +962,7 @@ const generatePatchEmbeddings = async (imageSource, modelIdentifier, tissueRegio
             ...Object.values(patchParams),
             Math.max(patchParams.width, patchParams.height)
         ])
-        addViewerOverlay(patchParams)
+        addViewerOverlay(patchParams, true)
         const tempImg = new Image()
         tempImg.onload = async () => {
             const oc = new OffscreenCanvas(tempImg.naturalWidth, tempImg.naturalHeight)
@@ -975,11 +1011,12 @@ const generatePatchEmbeddings = async (imageSource, modelIdentifier, tissueRegio
     }
 }
 
-function generateEmbeddingsHandler() {
+function generateEmbeddingsHandler(e) {
     if (!patchEmbed.imagebox3Instance) {
         alert("Please load the image first!")
         return
     }
+    e.target.setAttribute('disabled',"true")
     return generateEmbeddings(patchEmbed.imagebox3Instance.getImageSource(), document.getElementById('modelSelect').value)
 }
 
@@ -1001,11 +1038,20 @@ export async function generateEmbeddings(imageSource, modelIdentifier = "CTransP
 
     console.time("allEmbeddings")
     const tissueRegions = await getTissueRegions()
-    console.log(tissueRegions)
+    // console.log(tissueRegions)
+    // tissueRegions.forEach(reg => {
+    //     const {isEmpty, emptyProportion, ...tileParams} = reg
+    //     addViewerOverlay(tileParams, false)
+    // })
     return new Promise(async (resolve) => {
         await generatePatchEmbeddings(patchEmbed.imagebox3Instance.getImageSource(), modelIdentifier, tissueRegions)
         document.addEventListener('allEmbeddingsGenerated', async () => {
             console.timeEnd("allEmbeddings")
+            viewer.currentOverlays.forEach(overlay => viewer.removeOverlay(overlay.element))
+            if(document?.getElementById("generateEmbeddings")) {
+            document?.getElementById("generateEmbeddings").removeAttribute('disabled')
+
+            }
             const allEmbeddings = await retrieveEmbeddings()
             await runClusteringAndHeatmap(allEmbeddings);
         })
@@ -1136,11 +1182,11 @@ function updateClusterCount(count) {
     document.getElementById('clusterCount').textContent = count;
 }
 
- // Handle file selection
-        function handleFileSelect(event) {
-            const file = event.target.files[0];
-            if (file) {
-                document.getElementById('imageUrl').placeholder = `File selected: ${file.name}`;
-                document.getElementById('imageUrl').value = '';
-            }
-        }
+// Handle file selection
+function handleFileSelect(event) {
+    const file = event.target.files[0];
+    if (file) {
+        document.getElementById('imageUrl').placeholder = `File selected: ${file.name}`;
+        document.getElementById('imageUrl').value = '';
+    }
+}
