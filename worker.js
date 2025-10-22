@@ -209,7 +209,7 @@ self.onmessage = async function (e) {
         self.postMessage({ success: true, data: result, final })
         storeEmbeddings(imageSource, result)
     } catch (error) {
-        console.log(eror)
+        console.log(error)
         self.postMessage({ success: false, error: error.message })
     }
 };
