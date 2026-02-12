@@ -5,19 +5,23 @@ import { createTileSource as createOSDTileSource } from "https://prafulb.github.
 const patchEmbed = {}
 
 let viewer = null;
-let worker = null;
 let db = null;
-let currentEmbeddings = [];
+
 let currentClusters = [];
 let selectedRegion = null;
-let isSelecting = false;
 let selectionOverlay = null;
-let hnswIndex = null;
+// let hnswIndex = null;
 let heatmapOverlays = [];
 let heatmapVisible = true;
 let availableModels = [];
 let selectedModel = null;
-let clusterLabels = {}; // Stores mapping: { clusterIndex: "Label Text" }
+let clusterLabels = {};
+
+
+let roiRegion = null;
+let isDrawingROI = false;
+let roiOverlay = null;
+let roiTracker = null;
 
 document.addEventListener('DOMContentLoaded', async () => {
     await initIndexedDB()
@@ -691,7 +695,20 @@ function highlightRegion(x, y, width, height) {
 }
 
 function handleViewerClick(event) {
-    if (!isSelecting) return
+    // Handle ROI drawing mode
+    if (isDrawingROI) {
+        const webPoint = event.position
+        const viewportPoint = viewer.viewport.pointFromPixel(webPoint)
+
+        if (!roiRegion) {
+            roiRegion = {
+                startX: viewportPoint.x,
+                startY: viewportPoint.y
+            }
+        }
+        return
+    }
+
 
     const webPoint = event.position
     const viewportPoint = viewer.viewport.pointFromPixel(webPoint)
@@ -705,7 +722,15 @@ function handleViewerClick(event) {
 }
 
 function handleViewerDrag(event) {
-    if (!isSelecting || !selectedRegion) return
+    // Handle ROI drawing mode
+    if (isDrawingROI && roiRegion) {
+        const webPoint = event.position
+        const viewportPoint = viewer.viewport.pointFromPixel(webPoint)
+
+        updateROIOverlay(roiRegion.startX, roiRegion.startY,
+            viewportPoint.x, viewportPoint.y)
+        return
+    }
 
     const webPoint = event.position
     const viewportPoint = viewer.viewport.pointFromPixel(webPoint)
@@ -715,7 +740,17 @@ function handleViewerDrag(event) {
 }
 
 function handleViewerDragEnd(event) {
-    if (!isSelecting || !selectedRegion) return
+    // Handle ROI drawing mode
+    if (isDrawingROI && roiRegion) {
+        const webPoint = event.position
+        const viewportPoint = viewer.viewport.pointFromPixel(webPoint)
+
+        roiRegion.endX = viewportPoint.x
+        roiRegion.endY = viewportPoint.y
+
+        finalizeROI()
+        return
+    }
 
     const webPoint = event.position
     const viewportPoint = viewer.viewport.pointFromPixel(webPoint)
@@ -724,8 +759,6 @@ function handleViewerDragEnd(event) {
     selectedRegion.endY = viewportPoint.y
 
     processSelectedRegion()
-
-    isSelecting = false
 }
 
 function updateSelectionOverlay(startX, startY, endX, endY) {
@@ -748,6 +781,167 @@ function updateSelectionOverlay(startX, startY, endX, endY) {
     viewer.addOverlay(element, rect)
     selectionOverlay = element
 }
+
+// ROI overlay functions
+function updateROIOverlay(startX, startY, endX, endY) {
+    if (roiOverlay) {
+        viewer.removeOverlay(roiOverlay)
+    }
+
+    const element = document.createElement('div')
+    element.style.border = '3px solid #10B981'
+    element.style.backgroundColor = 'rgba(16, 185, 129, 0.2)'
+    element.style.pointerEvents = 'none'
+
+    const rect = new OpenSeadragon.Rect(
+        Math.min(startX, endX),
+        Math.min(startY, endY),
+        Math.abs(endX - startX),
+        Math.abs(endY - startY)
+    )
+
+    viewer.addOverlay(element, rect)
+    roiOverlay = element
+}
+
+function finalizeROI() {
+    if (!roiRegion) return
+
+    const minX = Math.min(roiRegion.startX, roiRegion.endX)
+    const maxX = Math.max(roiRegion.startX, roiRegion.endX)
+    const minY = Math.min(roiRegion.startY, roiRegion.endY)
+    const maxY = Math.max(roiRegion.startY, roiRegion.endY)
+
+    // Update ROI region with normalized bounds
+    roiRegion = {
+        startX: minX,
+        startY: minY,
+        endX: maxX,
+        endY: maxY
+    }
+
+    // Update ROI overlay with solid border
+    if (roiOverlay) {
+        viewer.removeOverlay(roiOverlay)
+    }
+
+    const element = document.createElement('div')
+    element.style.border = '3px solid #10B981'
+    element.style.backgroundColor = 'rgba(16, 185, 129, 0.15)'
+    element.style.pointerEvents = 'none'
+
+    const rect = new OpenSeadragon.Rect(
+        roiRegion.startX,
+        roiRegion.startY,
+        roiRegion.endX - roiRegion.startX,
+        roiRegion.endY - roiRegion.startY
+    )
+
+    viewer.addOverlay(element, rect)
+    roiOverlay = element
+
+    // Exit ROI drawing mode and re-enable panning
+    isDrawingROI = false
+    viewer.setMouseNavEnabled(true)
+    if (roiTracker) {
+        roiTracker.setTracking(false)
+    }
+
+    const button = document.getElementById('drawROI')
+    button.textContent = 'Draw ROI'
+    button.className = 'bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm'
+
+    updateStatus('ROI defined - embeddings will be generated only within this region')
+}
+
+function toggleROIDrawing() {
+    isDrawingROI = !isDrawingROI
+    const button = document.getElementById('drawROI')
+
+    if (isDrawingROI) {
+        // Clear existing ROI
+        if (roiOverlay) {
+            viewer.removeOverlay(roiOverlay)
+            roiOverlay = null
+        }
+        roiRegion = null
+
+        // Disable panning
+        viewer.setMouseNavEnabled(false)
+
+        // Create custom mouse tracker for ROI drawing
+        if (!roiTracker) {
+            roiTracker = new OpenSeadragon.MouseTracker({
+                element: viewer.canvas,
+                pressHandler: function (event) {
+                    if (!isDrawingROI) return
+
+                    const viewportPoint = viewer.viewport.pointFromPixel(event.position)
+                    roiRegion = {
+                        startX: viewportPoint.x,
+                        startY: viewportPoint.y
+                    }
+                },
+                dragHandler: function (event) {
+                    if (!isDrawingROI || !roiRegion) return
+
+                    const viewportPoint = viewer.viewport.pointFromPixel(event.position)
+                    updateROIOverlay(roiRegion.startX, roiRegion.startY,
+                        viewportPoint.x, viewportPoint.y)
+                },
+                releaseHandler: function (event) {
+                    if (!isDrawingROI || !roiRegion) return
+
+                    const viewportPoint = viewer.viewport.pointFromPixel(event.position)
+                    roiRegion.endX = viewportPoint.x
+                    roiRegion.endY = viewportPoint.y
+
+                    finalizeROI()
+                }
+            })
+        }
+        roiTracker.setTracking(true)
+
+        button.textContent = 'Drawing...'
+        button.className = 'bg-yellow-600 hover:bg-yellow-700 px-3 py-1 rounded text-sm'
+        updateStatus('ROI drawing mode active - click and drag to draw region')
+    } else {
+        // Re-enable panning
+        viewer.setMouseNavEnabled(true)
+
+        // Disable custom tracker
+        if (roiTracker) {
+            roiTracker.setTracking(false)
+        }
+
+        button.textContent = 'Draw ROI'
+        button.className = 'bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm'
+        updateStatus('ROI drawing mode deactivated')
+    }
+}
+
+function clearROI() {
+    roiRegion = null
+    isDrawingROI = false
+
+    if (roiOverlay) {
+        viewer.removeOverlay(roiOverlay)
+        roiOverlay = null
+    }
+
+    // Re-enable panning and disable custom tracker
+    viewer.setMouseNavEnabled(true)
+    if (roiTracker) {
+        roiTracker.setTracking(false)
+    }
+
+    const button = document.getElementById('drawROI')
+    button.textContent = 'Draw ROI'
+    button.className = 'bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm'
+
+    updateStatus('ROI cleared - embeddings will be generated for entire image')
+}
+
 
 // Process selected region
 async function processSelectedRegion() {
@@ -1055,10 +1249,12 @@ async function findSimilarPatches(selectedPatches) {
 function bindEvents() {
     document.getElementById('loadImage').addEventListener('click', loadImage)
     document.getElementById('generateEmbeddings').addEventListener('click', generateEmbeddingsHandler)
-    document.getElementById('selectRegion').addEventListener('click', toggleSelection)
-    document.getElementById('loadImage').addEventListener('click', loadImage);
-    document.getElementById('clearSelection').addEventListener('click', clearSelection);
     document.getElementById('toggleHeatmap').addEventListener('click', toggleHeatmap);
+
+    // ROI button event listeners
+    document.getElementById('drawROI').addEventListener('click', toggleROIDrawing);
+    document.getElementById('clearROI').addEventListener('click', clearROI);
+
     document.getElementById('browseFile').addEventListener('click', () => {
         document.getElementById('localFile').click();
     });
@@ -1124,7 +1320,7 @@ async function loadImage() {
     }
 }
 
-async function getTissueRegions(cellWidth = 224 * 8, cellHeight = 224 * 8) {
+async function getTissueRegions(cellWidth = 224 * 8, cellHeight = 224 * 8, roiBounds = null) {
     if (!patchEmbed.imagebox3Instance) return
     console.time("thumbnail")
     const imageInfo = await patchEmbed.imagebox3Instance.getInfo()
@@ -1143,10 +1339,28 @@ async function getTissueRegions(cellWidth = 224 * 8, cellHeight = 224 * 8) {
             const offscreenCanvas = new OffscreenCanvas(32, 32);
             const offscreenCtx = offscreenCanvas.getContext("2d");
 
-            for (let y = 0; y < imageHeight; y += cellHeight) {
-                for (let x = 0; x < imageWidth; x += cellWidth) {
-                    const w = Math.min(cellWidth, imageWidth - x);
-                    const h = Math.min(cellHeight, imageHeight - y);
+            // Determine iteration bounds
+            let startX = 0, startY = 0, endX = imageWidth, endY = imageHeight
+
+            if (roiBounds) {
+                // Convert viewport coordinates to image coordinates if needed
+                const world = viewer?.world?.getItemAt(0)
+                if (world) {
+                    // roiBounds are in viewport coordinates, convert to image coordinates
+                    const topLeft = world.viewportToImageCoordinates(roiBounds.startX, roiBounds.startY)
+                    const bottomRight = world.viewportToImageCoordinates(roiBounds.endX, roiBounds.endY)
+
+                    startX = Math.max(0, Math.floor(topLeft.x))
+                    startY = Math.max(0, Math.floor(topLeft.y))
+                    endX = Math.min(imageWidth, Math.ceil(bottomRight.x))
+                    endY = Math.min(imageHeight, Math.ceil(bottomRight.y))
+                }
+            }
+
+            for (let y = startY; y < endY; y += cellHeight) {
+                for (let x = startX; x < endX; x += cellWidth) {
+                    const w = Math.min(cellWidth, endX - x);
+                    const h = Math.min(cellHeight, endY - y);
 
                     // Project to thumbnail
                     const thumbX = (x / imageWidth) * thumbnailWidth;
@@ -1377,7 +1591,15 @@ export async function generateEmbeddings(imageSource, modelIdentifier = "CTransP
     }
 
     console.time("allEmbeddings")
-    const tissueRegions = await getTissueRegions()
+
+    // Pass ROI bounds if defined
+    const tissueRegions = await getTissueRegions(224 * 8, 224 * 8, roiRegion)
+
+    if (roiRegion) {
+        updateStatus(`Generating embeddings for ROI (${tissueRegions.length} patches)...`)
+    } else {
+        updateStatus(`Generating embeddings for entire image (${tissueRegions.length} patches)...`)
+    }
 
     await generatePatchEmbeddings(patchEmbed.imagebox3Instance.getImageSource(), modelIdentifier, tissueRegions)
 
@@ -1396,44 +1618,6 @@ export async function generateEmbeddings(imageSource, modelIdentifier = "CTransP
     const allEmbeddings = await retrieveEmbeddings()
     await runClusteringAndHeatmap(allEmbeddings);
 }
-
-function toggleSelection() {
-    isSelecting = !isSelecting
-    const button = document.getElementById('selectRegion')
-
-    if (isSelecting) {
-        button.textContent = 'Stop Selecting'
-        button.className = 'bg-yellow-600 hover:bg-yellow-700 px-3 py-1 rounded text-sm'
-        updateStatus('Selection mode active - click and drag to select region')
-    } else {
-        button.textContent = 'Select Region'
-        button.className = 'bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm'
-        updateStatus('Selection mode deactivated')
-    }
-}
-
-// function clearSelection() {
-//     selectedRegion = null
-//     isSelecting = false
-
-//     if (selectionOverlay) {
-//         viewer.removeOverlay(selectionOverlay)
-//         selectionOverlay = null
-//     }
-
-//     viewer.clearOverlays()
-
-//     if (currentPlotData) {
-//         const colors = currentPlotData.data[0].z
-//         Plotly.restyle('plot', { 'marker.color': [colors] }, [0])
-//     }
-
-//     const button = document.getElementById('selectRegion')
-//     button.textContent = 'Select Region'
-//     button.className = 'bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm'
-
-//     updateStatus('Selection cleared')
-// }
 
 function updateStatus(message) {
     if (document?.getElementById('status')?.textContent)
@@ -1490,36 +1674,6 @@ function handleModelChange(event) {
     }
 }
 
-// Clear selection
-function clearSelection() {
-    selectedRegion = null;
-    isSelecting = false;
-
-    if (selectionOverlay) {
-        viewer.removeOverlay(selectionOverlay);
-        selectionOverlay = null;
-    }
-
-    // Reset heatmap patch appearances
-    heatmapOverlays.forEach((overlay, i) => {
-        if (currentClusters[i]) {
-            const colors = generateClusterColors(Math.max(...currentClusters.map(c => c.cluster)) + 1);
-            const color = colors[currentClusters[i].cluster];
-            // overlay.style.opacity = '0.2';
-            // overlay.style.border = `1px solid rgba(${color.r}, ${color.g}, ${color.b}, 0.2)`;
-        }
-    });
-
-    const button = document.getElementById('selectRegion');
-    button.textContent = 'Select Region';
-    button.className = 'bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm';
-
-    updateStatus('Selection cleared');
-}
-
-// function updateClusterCount(count) {
-//     document.getElementById('clusterCount').textContent = count;
-// }
 function renderAnnotationUI(numClusters) {
     const container = document.getElementById('annotationList');
     container.innerHTML = '';
