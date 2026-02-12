@@ -9,9 +9,7 @@ const createSession = (modelIdentifier = "CTransPath") => {
     if (model) {
         // return ort.InferenceSession.create("http://localhost:5599/model.onnx", {
         return ort.InferenceSession.create(model.modelURL, {
-            executionProviders: ["webgpu"],
-            graphOptimizationLevel: 'all',
-            enableMemReuse: true,
+            executionProviders: ["webgpu"]
         })
     }
 }
@@ -28,8 +26,14 @@ function imageTransformsCombined(
     const numPixels = data.length / 4
     let whitePixelCount = 0
 
+    // Initialize Planar data: RRR...GGG...BBB...
     const inputData = new Float32Array(width * height * 3)
-    let j = 0
+
+    // Offset for Green and Blue channels
+    const gOffset = width * height
+    const bOffset = width * height * 2
+
+    let pixelIndex = 0;
     for (let i = 0; i < data.length; i += 4) {
         const r = data[i]
         const g = data[i + 1]
@@ -40,10 +44,14 @@ function imageTransformsCombined(
         }
 
         // Standard norm + Renorm using model preprocessor_config
-        inputData[j] = (r / 255.0 - mean[0]) / std[0]
-        inputData[j + 1] = (g / 255.0 - mean[1]) / std[1]
-        inputData[j + 2] = (b / 255.0 - mean[2]) / std[2]
-        j += 3
+        // R channel
+        inputData[pixelIndex] = (r / 255.0 - mean[0]) / std[0]
+        // G channel
+        inputData[pixelIndex + gOffset] = (g / 255.0 - mean[1]) / std[1]
+        // B channel
+        inputData[pixelIndex + bOffset] = (b / 255.0 - mean[2]) / std[2]
+
+        pixelIndex++
     }
 
     const whiteProportion = whitePixelCount / numPixels
@@ -227,7 +235,7 @@ function convertPrecision(embedding, precision) {
             return binarizeVector(embedding);
         case 'float32':
         default:
-            return new Float32Array(embedding);
+            return embedding;
     }
 }
 
@@ -262,7 +270,6 @@ async function storeEmbeddings(imageSource, patchData, precision = 'float32', st
     if (imageId instanceof File) {
         imageId = imageId.name;
     }
-
     // Convert precision for each patch
     const processedData = patchData.map(patch => ({
         ...patch,

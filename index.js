@@ -836,30 +836,101 @@ async function downloadEmbeddings() {
     if (imageId instanceof File) imageId = imageId.name;
 
     const storageType = document.getElementById('storageSelect').value;
-    let data;
+    let data = [];
+
+    // Helper to format a single embedding object
+    const formatEmbedding = (patch, embeddingVector) => {
+        const patchSize = 224; // Assuming 224 for now, ideally strictly from params
+        const x = patch.topLeftX
+        const y = patch.topLeftY
+        const w = patch.width
+        const h = patch.height
+        const precision = patch.precision
+        // Find cluster and annotation
+        // We need to match this patch with the currentClusters to get the cluster ID
+        // unique key: x-y
+        const clusterMatch = currentClusters.find(c =>
+            c.topLeftX === x && c.topLeftY === y
+        );
+
+        let annotation = "Unknown";
+        if (clusterMatch && clusterMatch.cluster !== undefined) {
+            annotation = clusterLabels[clusterMatch.cluster] || `Cluster ${clusterMatch.cluster + 1}`;
+        }
+        const usp = new URLSearchParams(document.location.search);
+        const annotationKey = usp.get("gleason") ? "gleason_score" : "annotation";
+        const id = `${imageId}_${x}_${y}_${w}_${h}_${patchSize}`;
+        const returnObj = {
+            "id": id,
+            "wsiId": imageId,
+            "wsiURL": imageId, // processing URL same as ID for now if file
+            "tileParams": {
+                "tileX": x,
+                "tileY": y,
+                "tileWidth": w,
+                "tileHeight": h,
+                "tileSize": w
+            },
+            "model": selectedModel ? selectedModel.modelName : "Unknown",
+            "embedding": Array.from(embeddingVector), // Ensure plain array
+            "properties": {}
+        };
+        returnObj.properties[annotationKey] = annotation;
+        return returnObj;
+    };
 
     if (storageType === 'indexeddb') {
         const result = await retrieveEmbeddings(imageId);
-        data = result.result;
+        // result.result is an array of objects from IDB
+        // Each object has: imageId, patchTopLeftX, patchTopLeftY, width, height, embedding (Float32Array), etc.
+        data = result.result.map(item => formatEmbedding(item, item.embedding));
+
     } else {
         // Retrieve from OPFS
         try {
-            const root = await navigator.storage.getDirectory();
-            const slideDir = await root.getDirectoryHandle(imageId);
-            const precision = document.getElementById('precisionSelect').value;
-            const fileHandle = await slideDir.getFileHandle(`embeddings_${precision}.bin`);
-            const file = await fileHandle.getFile();
-            const buffer = await file.arrayBuffer();
-            data = {
-                info: "OPFS binary data",
-                imageId,
-                precision,
-                byteLength: buffer.byteLength,
-                timestamp: new Date().toISOString()
-            };
+            // NOTE: OPFS retrieval logic currently retrieves specific binary file.
+            // Converting that back to structured JSON with coordinates requires reading metadata
+            // which we might not have stored fully in OPFS in previous steps (only binary data).
+            // However, the previous code just exported a metadata object about the binary file.
+            // If we want FULL JSON export from OPFS, we need to know coordinate order which implies 
+            // we should probably trust IndexedDB for the JSON export or we need a metadata file in OPFS.
+            // Given the complexity, I will pull from RetrieveEmbeddings logic which reads from IDB for metadata usually?
+            // Wait, previous code for OPFS read `embeddings_${precision}.bin`. 
+            // If the user wants granular JSON export, they likely need the metadata which is in IDB.
+            // Let's assume for JSON export we ALWAYS use data from memory/IDB if available, 
+            // or we warn if we only have raw binary. 
+            // For now, I will fallback to the same logic as IDB if possible, looking at `retrieveEmbeddings`.
+            // `retrieveEmbeddings` pulls from IDB. 
+            // If storage was OPFS, do we have metadata in IDB? 
+            // worker.js: storeInOPFS stores binary. storeEmbeddings (IDB) stores metadata + embedding.
+            // If storageType is OPFS, worker ONLY calls storeInOPFS? 
+            // Checking worker.js... 
+            // `if (storageType === 'indexeddb') { ... } else if (storageType === 'opfs') { storeInOPFS ... }`
+            // So if OPFS is used, IDB is EMPTY. 
+            // This means we CANNOT easily generate the requested JSON (with coordinates) from OPFS 
+            // without a separate metadata file. 
+            // For now, I will keep the OPFS export as "Binary Blob Info" OR alert user not supported for JSON export yet.
+            // BUT, the user request implies they want this structure. 
+
+            // Re-reading worker.js: storeInOPFS only writes binary buffer. No coordinates.
+            // This means we CANNOT satisfy the user request for OPFS storage type currently.
+            // I will add a check/alert for now, or fallback to simple export if strictly necessary.
+            // Given the instruction "in downloadEmbeddings...", I will focus on the structure.
+            // If data is available in memory (currentClusters), we could use that?
+            // `currentEmbeddings` or `currentClusters` might hold the data if recently generated.
+            // `currentClusters` is populated in `runClusteringAndHeatmap` which takes `embeddings`.
+            // If we have `currentClusters` in memory, we can use it!
+
+            if (currentClusters && currentClusters.length > 0) {
+                data = currentClusters.map(item => formatEmbedding(item, item.embedding));
+            } else {
+                alert("For OPFS storage, please generate embeddings/clusters first to have them in memory for JSON export, as metadata is not persisted in OPFS yet.");
+                return;
+            }
+
         } catch (e) {
             console.error(e);
-            alert("Could not find embeddings in OPFS.");
+            alert("Error preparing export from OPFS/Memory.");
             return;
         }
     }
@@ -999,25 +1070,8 @@ function bindEvents() {
         numClustersEl.addEventListener('change', updateClustering);
         numClustersEl.addEventListener('input', updateClustering); // Optional: if you want real-time update while typing
     }
-    document.getElementById('exportAnnotations').addEventListener('click', () => {
-        const exportData = {
-            labels: clusterLabels,
-            clusters: currentClusters.map(c => ({
-                x: c.patchTopLeftX,
-                y: c.patchTopLeftY,
-                clusterId: c.cluster,
-                label: clusterLabels[c.cluster]
-            }))
-        };
+    // Event listener for exportAnnotations removed
 
-        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'wsi-annotations.json';
-        a.click();
-        URL.revokeObjectURL(url);
-    });
     // Add drag and drop functionality
     const urlInput = document.getElementById('imageUrl');
     urlInput.addEventListener('dragover', (e) => {
