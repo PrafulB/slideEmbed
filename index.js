@@ -855,7 +855,7 @@ async function downloadEmbeddings() {
 
         let annotation = "Unknown";
         if (clusterMatch && clusterMatch.cluster !== undefined) {
-            annotation = clusterLabels[clusterMatch.cluster] || `Cluster ${clusterMatch.cluster + 1}`;
+            annotation = clusterLabels[clusterMatch.cluster] || undefined
         }
         const usp = new URLSearchParams(document.location.search);
         const annotationKey = usp.get("gleason") ? "gleason_score" : "annotation";
@@ -875,7 +875,9 @@ async function downloadEmbeddings() {
             "embedding": Array.from(embeddingVector), // Ensure plain array
             "properties": {}
         };
-        returnObj.properties[annotationKey] = annotation;
+        if (annotation) {
+            returnObj.properties[annotationKey] = annotation;
+        }
         return returnObj;
     };
 
